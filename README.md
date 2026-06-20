@@ -10,7 +10,7 @@ two-regime testbed, the naturalistic SQuAD validation, the noise-conditional ris
 estimator, and the **risk-binned Mondrian conformal risk control** procedure, together
 with every result file and the figure-generation code.
 
-**Repository:** https://github.com/shoumyac/Noise-Conditional-Hallucination-RAG
+**Repository:** https://github.com/shoumya-chy/ACML-RAG
 
 ## Repository structure
 
@@ -90,6 +90,6 @@ available, openly licensed models and the SQuAD dataset.
          and Shift-Robust Selective Generation for Retrieval-Augmented Language Models},
   author={Das, Anmita and Chowdhury, Shoumya and Paul, Sushanta},
   year={2026},
-  note={Code and data: \url{https://github.com/shoumyac/Noise-Conditional-Hallucination-RAG}}
+  note={Code and data: \url{https://github.com/shoumya-chy/ACML-RAG}}
 }
 ```
