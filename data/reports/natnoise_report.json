@@ -1,0 +1,17 @@
+{
+ "answered": 553,
+ "halluc_rate": 0.2115732368896926,
+ "halluc_gold_retrieved": 0.1794871794871795,
+ "halluc_gold_missed": 0.625,
+ "n_gold_retrieved": 507,
+ "n_gold_missed": 16,
+ "auc_retrieval": 0.5815984474241354,
+ "auc_model": 0.7121853681486708,
+ "auc_combined": 0.6905434015525759,
+ "auc_se": 0.6737924409942758,
+ "combined_minus_se": [
+  0.01692337397641843,
+  -0.023702438239758917,
+  0.05938232151551133
+ ]
+}

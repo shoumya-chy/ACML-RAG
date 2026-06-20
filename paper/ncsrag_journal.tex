@@ -1,0 +1,1268 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1.05in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+\usepackage{natbib}
+\usepackage{float}
+\setlength{\textfloatsep}{14pt plus 2pt minus 2pt}
+\setlength{\intextsep}{12pt plus 2pt minus 2pt}
+\setlength{\floatsep}{12pt plus 2pt minus 2pt}
+\usepackage{caption}
+\captionsetup{skip=10pt,labelfont=bf,font=small}
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\bottomfraction}{0.8}
+\renewcommand{\textfraction}{0.07}
+\renewcommand{\floatpagefraction}{0.75}
+\bibliographystyle{plainnat}
+
+\newtheorem{proposition}{Proposition}
+\newtheorem{assumption}{Assumption}
+\newtheorem{remark}{Remark}
+
+\title{Knowing When Not to Answer: Noise-Conditional Hallucination Risk
+Estimation and Shift-Robust Selective Generation for
+Retrieval-Augmented Language Models}
+
+\author{Anmita Das\thanks{Master of Information Technology
+(Artificial Intelligence), University of Melbourne, Australia.
+\texttt{aadas@student.unimelb.edu.au}. ORCID 0009-0000-1401-0494.} \and
+Shoumya Chowdhury\thanks{Master of Information Technology
+(Artificial Intelligence), University of Melbourne, Australia.
+\texttt{shoumyac@student.unimelb.edu.au}. ORCID 0009-0005-5552-1094.} \and
+Sushanta Paul\thanks{National Board of Revenue (Bangladesh Customs),
+Dhaka, Bangladesh. \texttt{sushanta.customs@gmail.com}.}}
+
+\date{Journal-track draft, \today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Retrieval-augmented generation (RAG) is widely deployed to reduce
+hallucination in large language models, yet retrieval is itself a noise
+source: irrelevant, contradictory, or misleading evidence can induce
+hallucinations a model would not otherwise produce. We study selective
+generation for RAG, where a system answers only when its hallucination
+risk is statistically controlled, under the realistic condition that the
+retrieval-noise distribution shifts between calibration and deployment.
+Using a controlled two-regime testbed that separates parametric from
+retrieval-induced error, we establish three behavioural regularities: a
+single unopposed false document is absorbed at 85 to 100 percent across
+three generators of two architectures, even against facts a model knows
+(context dominance); contradictions at the first context position are
+more than twice as damaging as at the last (misinformation primacy); and
+under conflicting evidence all errors are confident assertions rather
+than abstentions (silent failure). We then show that a noise-conditional
+risk estimator using observable retrieval descriptors predicts
+hallucination far better than model-internal uncertainty, beating
+sampling-based semantic entropy by 0.31 to 0.40 AUROC across six
+instruction-tuned model families. Standard conformal risk control and its
+covariate-shift remedies all violate a 10 percent target in 200 of 200
+resplits under noise shift; we introduce risk-binned Mondrian conformal
+risk control, prove its validity for bin-measurable shifts, and show it
+eliminates violations at competitive answer rates, with a label-free
+deployment monitor that makes its assumption checkable. Results hold
+across eight generators from 80M to 9B parameters, five model families,
+two architectures, and two content domains. Code and data are released.
+\end{abstract}
+
+\section{Introduction}\label{sec:intro}
+
+Retrieval-augmented generation \citep{lewis2020rag,gao2023ragsurvey}
+grounds large language models (LLMs) in external corpora and is
+routinely presented as a mitigation for hallucination
+\citep{huang2023hallucinationsurvey,zhang2025ragmitigation}. The
+argument rests on an assumption that deployment rarely satisfies:
+that retrieved evidence is relevant and correct. Production retrieval
+pipelines return passages that are off-topic, partially relevant,
+stale, about confusable entities, or factually wrong
+\citep{chen2023rgb,wang2024astuterag,cuconasu2024power}. Worse, the
+knowledge corpus itself can be corrupted: \citet{zou2025poisonedrag}
+show that injecting a handful of crafted documents reliably steers RAG
+answers, and defenses remain weak. A growing literature documents that
+LLMs over-trust retrieved context even against their own parametric
+knowledge \citep{xie2024adaptive,kortukov2024conflicts,xu2024survey}, so that RAG
+can paradoxically suppress appropriate abstention because added context
+raises confidence even when that context is wrong.
+When evidence is bad, RAG does not merely fail to help; it manufactures
+fluent, confident errors.
+
+For high-stakes applications the question is therefore not only how to
+make RAG more robust, but when a RAG system should decline to answer.
+Selective prediction has a long history in classification
+\citep{chow1970,geifman2017selective}; for generation, conformal
+methods provide finite-sample guarantees on error rates among answered
+queries \citep{angelopoulos2024crc,abbasi2024conformalabstention,
+quach2024conformal,mohri2024factuality}. Existing conformal treatments
+of RAG, however, either certify population-level risk
+\citep{kang2024crag} or assume the calibration data is exchangeable
+with deployment \citep{li2024traq,feng2025conformalrag}. Retrieval
+noise breaks exchangeability in a specific and practically common way:
+the mixture of noise regimes at deployment (which retriever, which
+corpus, which adversary) differs from the mixture at calibration. A
+system calibrated on clean development traffic and deployed against a
+degraded or poisoned corpus faces exactly this shift.
+
+This paper studies per-decision risk control for RAG under
+retrieval-noise shift. We ask three questions. First, can hallucination
+be predicted before answering from observable signals, and how much do
+retrieval-side descriptors add over the model-internal uncertainty
+measures that dominate current practice
+\citep{kuhn2023semantic,farquhar2024nature,kossen2024sep}? Second, how
+do noise type, severity, and position causally shape hallucination and
+abstention, and how do these effects interact with parametric
+knowledge? Third, when standard conformal calibration fails under noise
+shift, what restores validity, and at what cost in answer rate?
+
+Causal answers to the second question require intervening on evidence
+while holding queries fixed, and require separating parametric error
+(the model would have been wrong anyway) from retrieval-induced error
+(the noise caused the mistake). Naturalistic benchmarks support
+neither. We therefore construct a controlled two-regime testbed. A
+synthetic world of 240 fictional scientists guarantees that no
+pretrained model holds parametric knowledge of the queried facts, so
+closedbook hallucination is 100\% by construction and every correct
+answer is attributable to retrieval. Sixty well-known real facts
+(country capitals and currencies) provide the complementary regime in
+which mid-size models answer correctly without context 60\% to 90\% of
+the time. Typed noise is injected into a BM25 pipeline at graded
+severities and controlled context positions: partial and total
+irrelevance, contradictions at first and last rank, unopposed
+misinformation, confusable-entity distractors, and compound mixtures.
+Every generation is logged with retrieval-side, model-side, and
+closedbook-contrast features and labeled exactly against the closed
+answer space. The released dataset comprises 6{,}230 generations on the main
+domain across three generators spanning encoder-decoder and
+decoder-only architectures, plus 2{,}970 generations on an independent
+second domain.
+
+Our contributions are as follows.
+
+\begin{enumerate}
+\item \textbf{Behavioural regularities of noisy RAG}
+(\S\ref{sec:phenomena}). We document three phenomena. Context
+dominance: one unopposed false document yields hallucination rates of
+85\% to 100\% across all three generators, including on facts the
+models answer correctly without context. Misinformation primacy: a
+contradiction at rank 1 is more than twice as damaging as the same
+document at rank 4 (53\% versus 23\% hallucination without parametric
+support; 30\% versus 0\% with it). Universal silent failure: under
+every conflict-noise type, 100\% of errors are confident assertions;
+behavioural abstention occurs only under irrelevance noise. The
+negative-rejection ability targeted by current instruction tuning
+\citep{chen2023rgb,zhang2024rtuning} detects absent evidence but not
+deceptive evidence.
+\item \textbf{Noise-conditional risk estimation}
+(\S\ref{sec:estimation}). Combining retrieval descriptors,
+model-internal signals, and closedbook-contrast features raises
+hallucination-prediction AUROC from 0.788 to 0.915. A comparison
+against an earlier campaign with cruder noise shows the margin grows
+from 2.6 to 12.7 points as noise becomes subtler, inverting the natural
+objection that retrieval features are redundant with model confidence.
+Per-condition diagnostics locate the residual difficulty precisely in
+conflict noise (AUROC 0.60 to 0.72), the same regime in which models
+never warn.
+\item \textbf{Shift-robust selective generation}
+(\S\ref{sec:conformal}). Under clean-heavy calibration and noise-heavy
+deployment, marginal conformal risk control and its standard covariate
+shift remedies, learned-group calibration and density-ratio weighting
+\citep{tibshirani2019covariate}, violate a 10\% risk target in every
+one of 200 resplits. Risk-binned Mondrian conformal risk control,
+which certifies score bins with Clopper-Pearson upper bounds, is proved
+valid for bin-measurable shifts (Proposition~\ref{prop:riskbin}),
+eliminates violations entirely, answers 2.3 times more queries than a
+worst-group bound, and remains valid across target levels
+$\alpha \in \{0.10, 0.15, 0.20\}$, bin counts $B \ge 10$, and all
+tested shift severities.
+\item \textbf{Transfer analysis} (\S\ref{sec:transfer}). Risk
+estimators transfer across eight generators from 80M to 9B parameters
+and five model families with AUROC 0.87 to 0.96, yet
+transplanted thresholds realize 1.7 to 2.7 times the target risk.
+Discrimination is substantially model-general; calibration is not. The
+binned certification scheme supports cheap local recalibration, and we
+state the cross-lingual analogue of this experiment as a registered
+prediction for future work.
+\end{enumerate}
+
+\section{Related Work}\label{sec:related}
+
+\subsection{Noise, conflict, and corruption in RAG}
+Benchmarks and analyses have established that retrieval quality governs
+RAG reliability. RGB isolates noise robustness and negative rejection
+as core abilities and finds models lacking in both
+\citep{chen2023rgb}. RAGTruth provides word-level hallucination
+annotations for RAG outputs \citep{wu2024ragtruth}. RAAT types
+retrieval noise and trains adapters against it \citep{fang2024raat};
+Astute RAG consolidates internal and external knowledge at inference
+\citep{wang2024astuterag}. \citet{cuconasu2024power} report the
+counterintuitive finding that random irrelevant documents can improve
+RAG accuracy, while related distractors hurt; our graded-irrelevance
+results refine this picture (\S\ref{sec:discussion}). On the
+adversarial side, PoisonedRAG demonstrates effective knowledge
+corruption attacks with few injected documents
+\citep{zou2025poisonedrag}. Position effects are documented for long
+contexts by \citet{liu2024lost}; we show the analogous effect for
+misinformation specifically. Knowledge-conflict studies characterise
+when models prefer context over memory
+\citep{xie2024adaptive,kortukov2024conflicts,xu2024survey} and how to
+control the balance \citep{bi2025ckplug,zhang2024knowpo}. This
+literature measures and manipulates behaviour; it does not predict
+per-query hallucination risk or provide decision-level guarantees.
+
+\subsection{Uncertainty quantification for LLMs}
+Semantic entropy estimates uncertainty over meanings rather than
+strings \citep{kuhn2023semantic,farquhar2024nature}; probes recover it
+cheaply from hidden states \citep{kossen2024sep}; kernel language
+entropy refines the geometry \citep{nikitin2024kle}. Self-evaluation
+signals include P(True) \citep{kadavath2022language} and sampling
+consistency \citep{manakul2023selfcheckgpt}. These methods treat the
+generator as a closed system. None conditions on the quality or
+structure of retrieved evidence, and our results quantify the cost of
+that omission under retrieval noise.
+
+\subsection{Selective prediction and conformal guarantees}
+Selective classification with a reject option originates with
+\citet{chow1970} and was revived for deep networks by
+\citet{geifman2017selective}. Conformal risk control bounds the
+expectation of monotone losses \citep{angelopoulos2024crc}; conformal
+abstention applies this to hallucination
+\citep{abbasi2024conformalabstention}; conformal language modeling and
+conformal factuality give guarantees for generation
+\citep{quach2024conformal,mohri2024factuality}. For RAG, TRAQ ensembles
+conformal sets over retrieval and generation \citep{li2024traq};
+Conformal-RAG filters sub-claims with group-conditional coverage
+\citep{feng2025conformalrag}; C-RAG certifies an upper bound on
+population-level generation risk, including under bounded distribution
+drift \citep{kang2024crag}. Weighted conformal prediction corrects for
+known covariate shift via likelihood ratios
+\citep{tibshirani2019covariate}, adaptive conformal inference tracks
+unknown drift online \citep{gibbs2021aci}, and the limits of
+distribution-free conditional inference are themselves characterised by
+\citet{barber2021limits}.
+Our contribution sits at the intersection: we show empirically that
+likelihood-ratio weighting and unsupervised grouping both fail under
+noise-regime selection, and we give a binned certification scheme whose
+validity needs neither ratio estimation nor exchangeability, only that
+the calibrated score resolves the shift. We also show that population
+certificates and per-decision validity diverge sharply in this setting,
+which clarifies the relationship to C-RAG.
+The guarantees in this literature are of three kinds, and none is the
+one a selective-answering system needs. Conformal risk control and C-RAG
+bound population or marginal risk
+\citep{angelopoulos2024crc,kang2024crag}; conditional conformal methods
+and Conformal-RAG bound conditional \emph{coverage} rather than risk
+\citep{gibbs2025conditional,feng2025conformalrag}; and covariate-shift
+methods restore only \emph{marginal} coverage under a shifted test
+distribution \citep{tibshirani2019covariate,gibbs2021aci}. Weighted
+conformal risk control under covariate shift remains marginal rather than
+bin-conditional \citep{zecchin2025wcrc}, and exact feature-conditional
+coverage is impossible distribution-free \citep{barber2021limits}, which
+is precisely why we partition the feature space into a small number of
+risk bins instead. Our risk-binned Mondrian conformal risk control is, to
+our knowledge, the only method that delivers per-query, risk-bin-conditional
+control of the answer-or-abstain risk that stays valid under measurable
+retrieval-noise covariate shift.
+
+\section{Problem Setup and Method}\label{sec:method}
+
+\subsection{Setting and observable features}
+Let $q$ denote a query, $D = \{d_1, \dots, d_k\}$ the retrieved
+context, $a = f_\theta(q, D)$ the generated answer, and
+$y \in \{0, 1\}$ the indicator that $a$ is a hallucination, defined as
+a confident assertion whose normalised form contradicts the gold
+answer. Behavioural abstentions (the model answers ``unknown'' or
+equivalent) form a separate outcome class and are analysed separately.
+Each example carries a feature vector
+$x = (x^{\mathrm{ret}}, x^{\mathrm{mod}}, x^{\Delta})$.
+
+Retrieval-side descriptors $x^{\mathrm{ret}}$: mean, minimum, and top-1
+BM25 relevance of the context; the top-1 to top-2 margin; score
+dispersion; an inter-document conflict flag computed by extracting
+values for the queried attribute from each context document and testing
+for disagreement; the number of extracted claims; and a
+context-presence indicator. All are computable at decision time without
+labels.
+
+Model-side signals $x^{\mathrm{mod}}$: mean and minimum token
+log-probability of the generated answer, mean, maximum, and first-token
+predictive entropy, and answer length, in the spirit of standard
+white-box uncertainty measures.
+
+Closedbook-contrast features $x^{\Delta}$: the change in mean answer
+log-probability and entropy relative to the same query answered with no
+context, and an indicator of whether the answer changed. These
+operationalise the confidence-gain idea of \citet{bi2025ckplug} as risk
+features. They require one additional closedbook pass per query, which
+is cheap relative to retrieval.
+
+\subsection{Risk estimation}
+We estimate $\hat r(x) \approx \Pr[y = 1 \mid x]$ with
+gradient-boosted trees (150 trees, depth 3), evaluated with
+question-grouped five-fold cross-validation so that no question appears
+in both training and test folds. Feature-family ablations isolate the
+contribution of each signal class.
+
+\subsection{Selective generation and risk-binned certification}
+\label{sec:methodconformal}
+A selection rule answers query $x$ iff $\hat r(x) \le \tau$. Conformal
+risk control (CRC) selects $\tau$ on calibration data so that the
+hallucination rate among answered queries is at most a target $\alpha$,
+with finite-sample correction. The guarantee requires calibration and
+deployment to be exchangeable. Retrieval-noise shift, modelled as a
+change in the mixture of noise regimes, violates this.
+
+We propose risk-binned Mondrian CRC. Partition the calibration score
+range into $B$ quantile bins $\{I_b\}_{b=1}^{B}$. For each bin compute
+the Clopper-Pearson upper confidence bound $\widehat p^{\,+}_b$ at
+level $1 - \delta$ on the within-bin hallucination rate, and certify
+bin $b$ iff $\widehat p^{\,+}_b \le \alpha$. At deployment, answer iff
+the score falls in a certified bin. The scheme never extrapolates a
+threshold into score regions whose risk it has not measured; it only
+reuses bins whose risk it has certified.
+
+\begin{assumption}[Bin-measurable covariate shift]\label{ass:shift}
+The deployment distribution $Q$ and calibration distribution $P$
+satisfy (i) $Q(y \mid x) = P(y \mid x)$, and (ii) the likelihood ratio
+$dQ/dP(x)$ is constant on each bin $I_b$.
+\end{assumption}
+
+Condition (ii) formalises the requirement that the score resolves the
+shift: deployment may reweight bins arbitrarily, including
+adversarially toward high-risk bins, but may not redistribute mass
+within a bin. Selection over noise regimes that the risk score
+separates is of exactly this form.
+
+\begin{proposition}[Validity under bin-measurable shift]
+\label{prop:riskbin}
+Under Assumption~\ref{ass:shift}, with probability at least
+$1 - B\delta$ over the calibration draw, the hallucination rate among
+answered deployment queries is at most $\alpha$, simultaneously for
+every deployment distribution $Q$ satisfying the assumption.
+\end{proposition}
+
+\begin{proof}
+Fix a bin $I_b$. By Assumption~\ref{ass:shift}(ii) the conditional
+distribution of $x$ given $x \in I_b$ coincides under $P$ and $Q$;
+with (i), the within-bin risk $p_b = \Pr[y = 1 \mid x \in I_b]$ is
+distribution-independent. Calibration labels within $I_b$ are i.i.d.\
+Bernoulli($p_b$), so $\Pr[p_b \le \widehat p^{\,+}_b] \ge 1 - \delta$
+by the Clopper-Pearson construction. A union bound over the $B$ bins
+gives, with probability at least $1 - B\delta$, $p_b \le \alpha$ for
+every certified bin. The deployment risk among answered queries is a
+$Q$-weighted convex combination of certified-bin risks and is therefore
+at most $\alpha$ for any bin reweighting, which covers every $Q$ in the
+assumption class simultaneously.
+\end{proof}
+
+\begin{remark}
+The guarantee requires no estimate of the likelihood ratio. This is the
+step at which weighted conformal methods fail in our experiments: when
+noise regimes overlap in feature space, the estimated ratio
+under-corrects precisely in the high-risk tail. The price of
+certification is conservativeness, quantified empirically in
+\S\ref{sec:conformal} and \S\ref{sec:sensitivity}: within-bin score
+ordering is discarded, and small bins certify only with generous
+margins. The union-bound factor $B\delta$ ties the bin count to the
+confidence level; we use $B = 10$ and $\delta = 0.10$ in the main
+experiments and sweep both in \S\ref{sec:sensitivity}.
+\end{remark}
+
+We next characterise the price of certification in answer rate, which
+explains when the method is useful and how to choose the bin count.
+
+\begin{proposition}[Answer rate and its decomposition]\label{prop:eff}
+Let $\pi_b = \Pr_Q[\hat r(x) \in I_b]$ be the deployment mass of bin
+$I_b$ and let $C \subseteq \{1, \dots, B\}$ index the certified bins.
+The answer rate of risk-binned Mondrian CRC is
+$\rho = \sum_{b \in C} \pi_b$, and a bin is certified whenever its
+empirical risk satisfies
+$\widehat p_b \le \alpha - \varepsilon_b(\delta, n_b)$, where
+$\varepsilon_b(\delta, n_b)$ is the Clopper-Pearson half-width at
+calibration count $n_b$. Consequently
+\[
+\rho \;\ge\; \sum_{b:\, p_b \le \alpha - 2\varepsilon_b} \pi_b ,
+\]
+so the achievable answer rate is governed by the deployment mass lying
+in score bins whose true risk is bounded away from $\alpha$ by twice
+the finite-sample margin.
+\end{proposition}
+
+\begin{proof}
+The answer-rate identity is immediate since answered queries are exactly
+those whose score lands in a certified bin. For the bound, the empirical
+within-bin risk concentrates around $p_b$ within
+$\varepsilon_b(\delta, n_b)$ with probability $1 - \delta$ by the
+Clopper-Pearson interval; whenever $p_b \le \alpha - 2\varepsilon_b$,
+the upper bound $\widehat p^{\,+}_b = \widehat p_b + \varepsilon_b
+\le p_b + 2\varepsilon_b \le \alpha$, so the bin is certified. Summing
+the deployment mass of these bins lower-bounds $\rho$.
+\end{proof}
+
+Proposition~\ref{prop:eff} yields two practical consequences. First,
+the method answers nothing only when essentially all deployment mass
+sits in bins whose true risk exceeds $\alpha$, that is, when the
+deployment stream is genuinely almost all high-risk; in that regime
+abstention is the correct behaviour. Second, because
+$\varepsilon_b = O(\sqrt{p_b(1 - p_b)/n_b})$, increasing the bin count
+$B$ shrinks each $n_b$ and widens $\varepsilon_b$, which lowers answer
+rate, while decreasing $B$ coarsens the partition and risks violating
+Assumption~\ref{ass:shift}(ii). The two effects bracket an interior
+optimum, consistent with the bin-count sweep in
+\S\ref{sec:sensitivity}, where $B = 10$ maximises answer rate subject
+to validity.
+
+\begin{figure}[tbp]
+\centering
+\fbox{\begin{minipage}{0.9\linewidth}
+\textbf{Algorithm 1: Risk-binned Mondrian CRC for selective RAG}
+\par\vspace{3pt}\hrule\vspace{4pt}
+\textbf{Input:} calibration set $\{(x_i, y_i)\}_{i=1}^{n}$, risk scorer
+$\hat r$, target $\alpha$, bins $B$, level $\delta$.
+\begin{enumerate}\setlength{\itemsep}{1pt}
+\item Compute scores $s_i = \hat r(x_i)$ and bin edges
+$\{q_b\}_{b=0}^{B}$ as $B{+}1$ empirical quantiles of $\{s_i\}$.
+\item For each bin $b = 1, \dots, B$: let
+$S_b = \{i : q_{b-1} < s_i \le q_b\}$,
+$k_b = \sum_{i \in S_b} y_i$, $n_b = |S_b|$; compute the
+Clopper-Pearson upper bound
+$\widehat p^{\,+}_b = \mathrm{BetaInv}(1 - \delta,\, k_b + 1,\, n_b - k_b)$;
+certify bin $b$ if $\widehat p^{\,+}_b \le \alpha$.
+\item At deployment, for query $x$: compute $s = \hat r(x)$, locate its
+bin $b(s)$; answer if $b(s)$ is certified, otherwise abstain.
+\end{enumerate}
+\end{minipage}}
+\caption{Risk-binned Mondrian conformal risk control.}
+\label{alg:rb}
+\end{figure}
+
+\section{Experimental Design}\label{sec:design}
+
+\subsection{Two-regime fact world}
+The corpus contains 2{,}200 documents. For each of 240 fictional
+scientists we generate five gold fact sentences (birth year, birth
+city, field, invention, institution) from templates with filler
+clauses; for each of 60 real facts (30 capitals, 30 currencies) we
+write one gold sentence. For every question we add one confident
+contradiction document asserting a plausible false value, framed as a
+revised archival review or administrative reform; for every synthetic
+question, one confusable-entity distractor whose subject differs from
+the queried entity by one character; and 400 irrelevant topical
+fillers. Synthetic entities make parametric knowledge impossible, so
+closedbook hallucination is 100\% by construction; real facts provide
+the regime where parametric knowledge exists (closedbook accuracy:
+flan-t5-base 60\%, Qwen2.5-0.5B-Instruct 90\%).
+
+\subsection{Conditions}
+Eleven conditions per question. Clean retrieval; graded irrelevance
+irr25, irr50, irr75, irr100 (one to four of the $k = 4$ context slots
+replaced by topically plausible irrelevant documents, with the gold
+document removed at 100\%); contra\_r1 and contra\_r4 (gold present,
+contradiction at first or last rank); contra\_only (contradiction
+present, gold absent); distractor; mixed (gold plus contradiction plus
+irrelevant); closedbook.
+
+\subsection{Models, pipeline, and labels}
+BM25 retrieval over the full corpus; greedy decoding with at most 12 to
+14 new tokens. Generators: flan-t5-base (250M, encoder-decoder, all 11
+conditions, 3{,}300 generations), flan-t5-small (80M, 6 conditions,
+1{,}800 generations), and Qwen2.5-0.5B-Instruct (decoder-only,
+chat-templated prompts, 4 conditions on a 100-question subset, 410
+generations), plus a 720-generation preliminary campaign used only for
+the noise-subtlety comparison. Answers are normalised and matched
+exactly against the closed answer space, with a pattern-based
+abstention class. Labels are therefore programmatic and exact, which
+removes LLM-judge circularity from the measurement loop. The harness
+checkpoints atomically, resumes from interruption, and runs on
+commodity CPU hardware; a companion notebook scales the identical
+protocol to 7B-class models on GPU.
+
+\subsection{Evaluation protocol}
+Risk estimation uses question-grouped five-fold cross-validation;
+paired bootstrap over questions (2{,}000 resamples) gives confidence
+intervals for AUROC differences. Conformal experiments use 200
+question-level resplits; in each, calibration is drawn clean-heavy
+(noisy-condition rows subsampled to 30\%) and deployment noise-heavy
+(clean rows subsampled to 50\%), emulating calibration on development
+traffic followed by deployment against a degraded corpus. Sensitivity
+analyses vary the target $\alpha$, the bin count $B$, and the
+calibration noise retention from 0.9 down to 0.1.
+
+\section{Results}\label{sec:results}
+
+\subsection{Behavioural regularities of noisy RAG}\label{sec:phenomena}
+
+\begin{table}[tbp]
+\centering\small
+\caption{Hallucination (H) and abstention (A) rates by condition and
+regime, flan-t5-base ($n = 240$ synthetic and $60$ real per cell).
+C denotes correct.}
+\label{tab:dose}
+\begin{tabular}{lcccc}
+\toprule
+& \multicolumn{2}{c}{Synthetic (no param.\ knowledge)} &
+\multicolumn{2}{c}{Real (param.\ knowledge)} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+Condition & H & A & H & A \\
+\midrule
+clean        & 0.00 & 0.00 & 0.00 & 0.00 \\
+irr25        & 0.03 & 0.00 & 0.00 & 0.00 \\
+irr50        & 0.09 & 0.00 & 0.00 & 0.00 \\
+irr75        & 0.16 & 0.00 & 0.00 & 0.00 \\
+irr100       & 0.62 & 0.38 & 0.20 & 0.78 \\
+contra\_r1   & 0.53 & 0.00 & 0.30 & 0.00 \\
+contra\_r4   & 0.23 & 0.00 & 0.00 & 0.00 \\
+contra\_only & 1.00 & 0.00 & 1.00 & 0.00 \\
+distractor   & 0.17 & 0.00 & 0.00 & 0.00 \\
+mixed        & 0.45 & 0.00 & 0.15 & 0.00 \\
+closedbook   & 1.00 & 0.00 & 0.40 & 0.00 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[tbp]
+\centering
+\includegraphics[width=0.95\textwidth]{v2_dose_response.png}
+\caption{Left: graded irrelevance dose-response. Hallucination rises
+smoothly with severity; abstention appears only at total irrelevance,
+and reliably only in the parametric-knowledge regime. Right:
+conflict-type and position effects.}
+\label{fig:dose}
+\end{figure}
+
+\paragraph{Context dominance.}
+Under contra\_only, hallucination is 100\% in both regimes for
+flan-t5-base (Table~\ref{tab:dose}). The decoder-only replication is
+equally stark: Qwen2.5-0.5B-Instruct, which answers the real-fact
+questions correctly 90\% of the time with no context at all,
+hallucinates on 85\% of them when a single unopposed false document is
+present, and on 100\% of the synthetic questions
+(Table~\ref{tab:qwen}). Parametric knowledge arbitrates conflicts only
+when supporting evidence is also retrieved; in its absence, context
+wins almost absolutely. This sharpens the parametric-bias picture of
+\citet{kortukov2024conflicts} and gives the phenomenon a security
+reading consistent with \citet{zou2025poisonedrag}: a corpus-poisoning
+attack does not need to outvote the truth, it only needs the truth
+absent from the retrieved window. Our measurements quantify the
+per-document absorption rate that makes such attacks efficient. The
+direction of the effect matches the broad observation that models output
+incorrect answers instead of abstaining when context is insufficient; we add the
+causal decomposition by noise type and position and the per-document
+absorption rate.
+
+\paragraph{Misinformation primacy.}
+With gold evidence present, moving the contradiction from rank 1 to
+rank 4 cuts hallucination from 0.53 to 0.23 without parametric support
+and from 0.30 to 0.00 with it. Position in the context window is a
+deployment-observable risk factor, complementary to the attention
+position effects of \citet{liu2024lost}, and no existing uncertainty
+or selective-RAG method conditions on it.
+
+\paragraph{Universal silent failure.}
+Across every conflict condition (contra\_r1, contra\_r4, contra\_only,
+distractor, mixed), 100\% of errors are confident assertions; the model
+abstained in 0 of those error cases. Under pure irrelevance the model
+abstains on 38\% (synthetic) to 78\% (real) of affected queries. The
+same asymmetry holds exactly for the decoder-only model. Training for
+negative rejection \citep{chen2023rgb,zhang2024rtuning} therefore
+addresses the loud failure mode and leaves the silent one untouched,
+which is the central argument for external, evidence-aware risk
+control.
+
+\begin{table}[tbp]
+\centering\small
+\caption{Decoder-only replication: Qwen2.5-0.5B-Instruct on the
+100-question subset. The same regularities hold, with greater conflict
+vulnerability than the encoder-decoder models.}
+\label{tab:qwen}
+\begin{tabular}{lcccc}
+\toprule
+& \multicolumn{2}{c}{Synthetic} & \multicolumn{2}{c}{Real} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+Condition & H & C & H & C \\
+\midrule
+closedbook   & 1.00 & 0.00 & 0.10 & 0.90 \\
+clean        & 0.05 & 0.95 & 0.02 & 0.98 \\
+contra\_r1   & 0.78 & 0.22 & 0.73 & 0.27 \\
+contra\_only & 1.00 & 0.00 & 0.85 & 0.15 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Chat tuning increases conflict vulnerability.}
+With gold and contradiction both present at rank 1, the chat-tuned
+decoder model hallucinates on 73\% of real-fact queries against 30\%
+for flan-t5-base, despite knowing more of the underlying facts (90\%
+versus 60\% closedbook accuracy). Stronger context obedience, an
+explicit objective of instruction tuning for RAG, appears to trade
+directly against conflict robustness. We flag this trade-off as a
+finding that should be tested at larger scales with the released
+harness.
+
+\subsection{Noise-conditional risk estimation}\label{sec:estimation}
+
+\begin{table}[tbp]
+\centering\small
+\caption{Hallucination-risk prediction, question-grouped five-fold CV,
+flan-t5-base ($n = 3{,}161$ answered; base rate 0.363).}
+\label{tab:auroc}
+\begin{tabular}{lc}
+\toprule
+Feature family & AUROC \\
+\midrule
+Retrieval-side descriptors        & 0.897 \\
+Model-internal (logprob, entropy) & 0.788 \\
+Closedbook contrast               & 0.700 \\
+Model + contrast                  & 0.811 \\
+Combined (noise-conditional)      & \textbf{0.915} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The combined estimator improves on model-internal signals by 0.127
+AUROC (95\% CI 0.115 to 0.140); the closedbook-contrast family alone
+adds 0.023 (CI 0.013 to 0.035) over model-internal signals
+(Table~\ref{tab:auroc}). The comparison with our preliminary campaign
+is instructive. With crude noise (only total irrelevance and rank-1
+contradictions), the combined-versus-model gap was 0.026; with the
+graded and positional noise grid it is 0.127, because model-internal
+discrimination falls from 0.905 to 0.788 while retrieval descriptors
+hold (0.899 to 0.897). Subtle noise is precisely where context-agnostic
+uncertainty fails and noise conditioning pays.
+
+\paragraph{Where prediction remains hard.}
+Per-condition diagnostics (out-of-fold scores) show near-perfect
+discrimination on irrelevance noise (irr25 to irr100: AUROC 0.98 to
+1.00) and substantially lower discrimination under conflict
+(contra\_r1: 0.605; mixed: 0.596; contra\_r4: 0.722; distractor:
+0.839). The estimator is well calibrated overall (ECE 0.024, 10
+quantile bins), and feature importances are dominated by mean retrieval
+relevance (0.45) followed by minimum token log-probability and the
+relevance margin. The hard residual case, conflict-induced
+hallucination, is exactly the silent regime of
+\S\ref{sec:phenomena}; this conjunction, hardest to predict and never
+self-signalled, is what the conformal layer must cover.
+
+\subsection{Comparison with uncertainty-quantification baselines}
+\label{sec:baselines}
+
+\begin{table}[tbp]
+\centering\small
+\caption{Hallucination prediction against real UQ baselines computed on the
+same generator (flan-t5-small, 120-question subset, five samples per query
+for semantic entropy). Higher is better. The noise-conditional estimator
+uses only label-free retrieval descriptors.}
+\label{tab:baselines}
+\begin{tabular}{lc}
+\toprule
+Signal & AUROC \\
+\midrule
+Semantic entropy \citep{kuhn2023semantic,farquhar2024nature} & 0.675 \\
+$1 - $ P(True) \citep{kadavath2022language}                      & 0.710 \\
+Noise-conditional estimator (ours, retrieval only)           & 0.893 \\
+Noise-conditional estimator $+$ semantic entropy $+$ P(True) & \textbf{0.915} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A natural question is whether the gains over model-internal log-probability
+and entropy (\S\ref{sec:estimation}) survive comparison with purpose-built
+uncertainty-quantification methods. We computed two standard baselines on
+the same generator: discrete semantic entropy
+\citep{kuhn2023semantic,farquhar2024nature} from five temperature samples,
+using exact normalised-string equivalence as the semantic-equivalence
+relation (which is exact for the closed answer space rather than approximated
+by an entailment model), and P(True) self-evaluation
+\citep{kadavath2022language}. Table~\ref{tab:baselines} shows the noise-conditional
+estimator outperforms semantic entropy by 0.218 AUROC
+(95\% CI 0.193 to 0.243) and P(True) by 0.183. Adding both signals to our
+estimator yields only a further 0.022 (95\% CI 0.012 to 0.033), so the
+predictive power resides in the observable retrieval structure, not in
+sampling-based self-consistency. This is consistent with the
+mechanism we isolate in \S\ref{sec:decomp}: sampling-based entropy tracks the
+model's internal disagreement, which is informative when evidence is missing
+but near blind when the model confidently absorbs a coherent falsehood, so under
+retrieval noise the decisive signal is the quality of the evidence, which
+model-internal uncertainty does not observe. The gap widens with model capability: on Qwen2.5-7B-Instruct, sampling-based
+semantic entropy is barely better than chance at predicting
+retrieval-induced hallucination (AUROC 0.536), while the noise-conditional
+estimator reaches 0.892, a difference of 0.356 AUROC (95\% CI 0.340 to
+0.373) -- larger than the 0.218 gap on the 80M model, the opposite of what a
+small-model artefact would predict.
+
+\subsection{Selective generation under noise shift}\label{sec:conformal}
+
+\begin{table}[tbp]
+\centering\small
+\caption{Selective generation at target risk $\alpha = 0.10$ under
+clean-heavy calibration and noise-heavy deployment; 200 resplits,
+flan-t5-base. Violation is the fraction of resplits whose realized risk
+exceeds $\alpha$.}
+\label{tab:crc}
+\begin{tabular}{lccc}
+\toprule
+Method & Realized risk & Violation & Answer rate \\
+\midrule
+Marginal CRC                    & 0.215 & 100\% & 70.5\% \\
+Heuristic-group CRC             & 0.189 & 100\% & 60.9\% \\
+Learned-group CRC ($k$-means)   & 0.213 & 100\% & 67.0\% \\
+Density-ratio weighted CRC      & 0.176 & 100\% & 61.5\% \\
+Worst-group CRC                 & 0.035 & 22\%  & 12.7\% \\
+Risk-binned Mondrian CRC (ours) & \textbf{0.063} & \textbf{0\%} & \textbf{29.2\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[tbp]
+\centering
+\includegraphics[width=0.78\textwidth]{v2_crc_methods.png}
+\caption{Realized risk among answered queries across 200 resplits at
+$\alpha = 0.10$ (dotted line). The four standard methods lie entirely
+above the target; risk-binned certification is the only practical
+method below it.}
+\label{fig:crc}
+\end{figure}
+
+Table~\ref{tab:crc} and Figure~\ref{fig:crc} contain the central
+result. Marginal CRC roughly doubles its target risk. The two textbook
+covariate-shift remedies fail in every resplit as well: unsupervised
+$k$-means groups in descriptor space do not align with risk strata, and
+the logistic-regression density ratio under-corrects in the high-risk
+tail because noise regimes overlap in feature space. The worst-group
+bound is valid in most resplits but answers only 12.7\% of queries.
+Risk-binned certification eliminates violations entirely at a 29.2\%
+answer rate. The mechanism is the one identified in
+\S\ref{sec:methodconformal}: certification reuses only measured risk,
+so reweighting bins cannot break it, whereas every thresholding method
+implicitly extrapolates.
+
+\subsection{Sensitivity and robustness analyses}\label{sec:sensitivity}
+
+\begin{figure}[tbp]
+\centering
+\includegraphics[width=0.99\textwidth]{v2_sensitivity.png}
+\caption{Sensitivity of the guarantee. Left: target-level sweep;
+marginal CRC scales its violation with $\alpha$ while risk-binned
+certification tracks below target. Centre: bin-count sweep at
+$\alpha = 0.10$; five bins are too coarse, ten suffice. Right:
+shift-severity sweep; marginal risk grows monotonically from 0.143 to
+0.291 as calibration sees less noise, while risk-binned certification
+stays controlled throughout.}
+\label{fig:sens}
+\end{figure}
+
+Three sweeps probe the regime of validity (Figure~\ref{fig:sens};
+60 resplits per cell). Across targets, risk-binned certification is
+valid at $\alpha \in \{0.10, 0.15, 0.20\}$ with zero violations and
+shows 8\% violations at the strict $\alpha = 0.05$, consistent with
+the certification level $\delta = 0.10$; marginal CRC violates at
+every target, with realized risk roughly $2\alpha$. Across bin counts,
+$B = 5$ is too coarse (25\% violations), while $B \in \{10, 20, 40\}$
+are all valid, trading answer rate (0.29 down to 0.20) against
+granularity exactly as the union-bound analysis predicts. Across shift
+severities, marginal risk degrades monotonically from 0.143 (mild
+shift) to 0.291 (severe), while risk-binned certification remains
+controlled over the entire range, with answer rate adapting from 0.20
+to 0.35. The guarantee is not an artefact of one operating point.
+
+\subsection{Robustness to within-bin shift and a deployment monitor}
+\label{sec:selfdiag}
+
+Proposition~\ref{prop:riskbin} assumes the shift is bin-measurable
+(Assumption~\ref{ass:shift}(ii)); its one failure mode is a within-bin
+shift that raises the true risk of a certified bin without moving scores.
+We stress-test this directly. Holding the inter-document conflict flag out
+of the risk score so that it acts as a latent within-bin risk driver, we
+construct an adversarial deployment that upweights high-conflict items by a
+factor of twelve. Even under this attack the naive method degrades only
+mildly: realized risk rises from 0.066 (benign) to 0.072, and the violation
+rate from 0\% to 4\%, against the 0.10 target. The risk score absorbs enough
+of the risk-relevant covariate structure that an attacker confined to
+within-bin reweighting has little leverage. This empirical robustness
+exceeds what the formal assumption guarantees.
+
+When stricter safety is required, the held-out covariate can be monitored at
+deployment without labels. For each certified bin we compare the conflict
+rate of the deployment members against the calibration members and decertify
+a bin when the deployment rate exceeds calibration by a margin (a directional
+test, since higher conflict implies higher risk). The monitor discriminates:
+it flags on average 4.67 certified bins under the adversarial within-bin
+shift but only 1.39 under the benign bin-measurable shift, a 3.4-fold
+contrast, so it fires in response to genuine within-bin drift rather than to
+benign noise-regime reweighting. The monitor provides an optional
+conservative safeguard whose cost is answer rate, and it makes the method's
+one assumption checkable in deployment rather than merely assumed
+(Figure~\ref{fig:selfdiag}).
+
+\begin{figure}[tbp]
+\centering
+\includegraphics[width=0.66\textwidth]{v2_selfdiag.png}
+\caption{Robustness to within-bin shift. Under a 12-fold adversarial
+within-bin reweighting toward high-conflict items (centre), the naive
+method's realized risk stays near the benign level (left) and below the
+0.10 target; the directional deployment monitor (right) decertifies
+drifted bins for stricter safety.}
+\label{fig:selfdiag}
+\end{figure}
+
+\subsection{Generality across models, estimators, and domains}
+\label{sec:generality}
+
+\begin{table}[tbp]
+\centering\small
+\caption{Generality of the central result across eight generators
+spanning 80M to 9B parameters and five model families (FLAN-T5, Qwen,
+Microsoft Phi, Mistral, Google Gemma), two architectures
+(encoder-decoder and decoder-only), and an independent second domain.
+For every generator the combined risk estimator discriminates
+hallucination well (AUROC 0.87 to 0.96), the sampling-based semantic
+entropy baseline stays near chance (AUROC 0.52 to 0.64), marginal CRC
+violates the $\alpha = 0.10$ target in essentially every resplit, and
+risk-binned Mondrian CRC restores the guarantee (0\% to 4\%
+violations). The six decoder-only instruction-tuned models each ran the
+full eleven-condition grid (about 3{,}300 generations) with white-box
+logprob and entropy features and bidirectional-NLI semantic entropy.
+AUROC columns use question-grouped cross-validation.}
+\label{tab:generality}
+\begin{tabular}{llccccc}
+\toprule
+& & \multicolumn{2}{c}{Estimator AUROC} &
+\multicolumn{1}{c}{Marg.} & \multicolumn{2}{c}{Risk-binned CRC} \\
+\cmidrule(lr){3-4}\cmidrule(lr){5-5}\cmidrule(lr){6-7}
+Generator & Domain & Comb. & SE & Viol. & Viol. & Ans.\ rate \\
+\midrule
+flan-t5-small (80M, enc-dec)    & scientists & 0.959 & ---   & 100\% & 0\% & 17.5\% \\
+flan-t5-base (250M, enc-dec)    & scientists & 0.915 & ---   & 100\% & 0\% & 28.8\% \\
+Qwen2.5-1.5B (dec-only)         & scientists & 0.871 & 0.535 & 100\% & 0\% & 35.3\% \\
+Qwen2.5-3B (dec-only)           & scientists & 0.874 & 0.530 & 100\% & 4\% & 29.7\% \\
+Phi-3.5-mini (3.8B, dec-only)   & scientists & 0.948 & 0.640 & 100\% & 0\% & 28.9\% \\
+Mistral-7B-v0.3 (dec-only)      & scientists & 0.950 & 0.617 & 100\% & 0\% & 36.9\% \\
+\textbf{Qwen2.5-7B-Instruct (dec-only)} & scientists & \textbf{0.892} & \textbf{0.536} & \textbf{100\%} & \textbf{1\%} & \textbf{36.7\%} \\
+Gemma-2-9B-it (dec-only)        & scientists & 0.923 & 0.523 & 100\% & 1\% & 39.0\% \\
+flan-t5-small (80M, enc-dec)    & companies  & 0.920 & ---   & 100\% & 0\% & 21.7\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[tbp]
+\centering
+\includegraphics[width=0.8\textwidth]{fig_sixfamily.png}
+\caption{Combined risk estimator versus the sampling-based semantic
+entropy baseline across the six instruction-tuned families of
+Table~\ref{tab:generality}. The combined estimator (AUROC 0.87 to 0.95)
+separates cleanly from semantic entropy (0.52 to 0.64) on every family,
+and the gap does not shrink with model scale.}
+\label{fig:sixfamily}
+\end{figure}
+
+\paragraph{Six instruction-tuned families.}
+To rule out that the result is an artifact of one model or one
+architecture, we ran the full eleven-condition grid on six decoder-only
+instruction-tuned generators spanning 1.5B to 9B parameters and four
+independent pretraining families: Qwen2.5 (1.5B, 3B, 7B), Microsoft
+Phi-3.5-mini (3.8B), Mistral-7B-v0.3, and Google Gemma-2-9B. Each run
+logs true token logprobs, predictive entropy, and bidirectional-NLI
+semantic entropy, for about 3{,}300 generations per model. The combined
+noise-conditional estimator discriminates hallucination with AUROC
+between 0.871 and 0.950 on every family, while sampling-based semantic
+entropy never rises above 0.640 and sits near chance (0.52 to 0.54) on
+four of the six. The combined-minus-semantic-entropy advantage ranges
+from $+0.308$ to $+0.400$ AUROC, and every per-model bootstrap interval
+excludes zero by a wide margin, so the baseline gap is not specific to
+any one generator. Marginal CRC violates the $\alpha = 0.10$ target in
+100\% of resplits on all six models, and risk-binned Mondrian CRC
+restores the guarantee on all six (realized risk 0.022 to 0.060,
+violation 0\% to 4\%) at answer rates of 29\% to 39\%. The largest
+semantic-entropy gap ($+0.400$) and the highest answer rate (39\%) both
+occur on the largest model, Gemma-2-9B, so neither the estimator
+advantage nor the efficiency of the guarantee degrades with scale.
+
+\paragraph{Second domain.}
+To test whether the findings depend on the content of the synthetic
+world, we built an independent domain with the same structure but
+disjoint subject matter: 240 fictional technology companies (five
+attributes: founding year, headquarters city, sector, flagship product,
+founder) and 30 real chemical-element symbol facts, with 2{,}140
+documents and the full eleven-condition noise grid, generated with
+flan-t5-small (2{,}970 generations). Every phenomenon reproduces.
+Unopposed misinformation is absorbed at 100\% on the synthetic
+companies and 73\% on the real facts; the rank-1 contradiction is
+0.72 against 0.18 at rank 4; and silent failure is 1.00 across all
+conflict conditions and 0.98 under total irrelevance. The risk
+estimator reaches AUROC 0.920, marginal CRC violates the target in
+every resplit, and risk-binned CRC never violates it (realized risk
+0.016, answer rate 21.7\%). The behavioural regularities and the
+guarantee are properties of noisy RAG, not of one corpus.
+
+\paragraph{Scaling to a 7B instruct model.}
+A full 11-condition run on Qwen2.5-7B-Instruct (3{,}300 generations on
+an A100, with token-logprob and entropy features and bidirectional-NLI
+semantic entropy) confirms and sharpens the findings. Context dominance
+is most striking here: a single unopposed false document yields 100\%
+hallucination on synthetic facts and 85\% on real facts the model
+answers correctly 97\% of the time without context. Negative rejection
+improves with scale, so silent failure under pure irrelevance falls to
+zero (the model abstains), yet under unopposed misinformation 97\% of
+errors remain confident assertions. The position effect inverts relative
+to the encoder-decoder models: for the decoder-only chat model a
+contradiction at the last context position is more damaging than at the
+first (rank-1 0.38 versus rank-4 0.67), so position remains a major
+observable risk factor whose damaging end is architecture-dependent. The
+noise-conditional estimator reaches AUROC 0.892 against 0.690 for
+model-internal signals, marginal CRC violates the target in every
+resplit, and risk-binned CRC never violates it at a 36.7\% answer rate,
+higher than on the smaller models because the stronger generator
+concentrates more mass in low-risk bins.
+
+\paragraph{Estimator architecture.}
+The risk estimator is not tied to gradient boosting. On flan-t5-base,
+logistic regression, random forest, gradient boosting, and a small
+multilayer perceptron reach AUROC 0.870, 0.922, 0.915, and 0.905
+respectively; the ordering is similar on the other models, with random
+forest and boosting consistently strongest. The noise-conditional
+signal is recoverable by any reasonable classifier, which argues that
+the gain comes from the features rather than the model class.
+
+\paragraph{Recalibration.}
+Because Proposition~\ref{prop:eff} ties answer rate to the agreement
+between empirical and true within-bin risk, we tested whether isotonic
+recalibration of the score on the calibration set improves the answer
+rate. It does not: the gradient-boosted score is already well
+calibrated (ECE 0.024), and isotonic post-processing slightly reduces
+answer rate while preserving validity. We therefore report the method
+without a recalibration step, noting that on a poorly calibrated base
+scorer recalibration would be expected to help.
+
+\subsection{Cross-model transfer}\label{sec:transfer}
+Training the risk estimator on one generator and deploying it on the
+other preserves discrimination but not calibration. From flan-t5-small
+to flan-t5-base, AUROC is 0.827 and a source-calibrated threshold at
+$\alpha = 0.10$ realizes risk 0.170; in the reverse direction, AUROC
+is 0.908 and realized risk is 0.269. Rankings of risky inputs are
+substantially model-general; absolute risk levels are not. Portable
+selective RAG therefore requires local recalibration, which binned
+certification supports at low cost since bins can be re-certified on a
+small labelled sample from the target system. We register the
+prediction that the same dissociation governs cross-lingual transfer,
+for instance from English to Bengali retrieval corpora, and leave its
+test to follow-up work on naturalistic multilingual data.
+
+\subsection{Naturalistic validation on real retrieval}
+\label{sec:naturalistic}
+The controlled world isolates each noise mechanism, but a referee may
+reasonably ask whether the effects survive genuine retrieval. We
+therefore rebuilt the pipeline on SQuAD: a 300-paragraph pool with one
+question per paragraph, real BM25 and dense (e5 plus FAISS) retrieval,
+the same typed-noise grid, and PoisonedRAG poisoning
+\citep{zou2025poisonedrag} as an adversarial condition, run on two
+instruction-tuned generators (Qwen2.5-7B and Mistral-7B-v0.3) with
+white-box features and discrete semantic entropy.
+Table~\ref{tab:natauroc} reports the estimator on the answered subset.
+The combined estimator reaches AUROC 0.84 to 0.86 on genuine retrieval
+for both generators, and BM25 and dense retrieval give almost identical
+numbers (0.842 versus 0.840 for Qwen, 0.852 versus 0.857 for Mistral),
+so the signal is retriever-independent. The advantage over semantic
+entropy is positive and significant in every cell ($+0.14$ to $+0.31$
+AUROC, all confidence intervals excluding zero), though smaller than in
+the controlled world because Mistral's semantic entropy is itself more
+informative here (0.71).
+
+\begin{table}[tbp]
+\centering\small
+\caption{Naturalistic validation on real SQuAD retrieval. Combined risk
+estimator versus the semantic entropy (SE) baseline on the answered
+subset, for two generators and two retrievers. Combined-minus-SE shows a
+bootstrap 95\% confidence interval.}
+\label{tab:natauroc}
+\begin{tabular}{llccc}
+\toprule
+Generator & Retriever & Combined & SE & Combined $-$ SE [95\% CI] \\
+\midrule
+Qwen2.5-7B & BM25  & 0.842 & 0.533 & $+0.309$ [$+0.284, +0.334$] \\
+Qwen2.5-7B & dense & 0.840 & 0.545 & $+0.295$ [$+0.267, +0.325$] \\
+Mistral-7B & BM25  & 0.852 & 0.714 & $+0.138$ [$+0.117, +0.159$] \\
+Mistral-7B & dense & 0.857 & 0.693 & $+0.164$ [$+0.141, +0.186$] \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Per-condition hallucination on real retrieval (Figure~\ref{fig:natpercond})
+confirms the controlled ordering: PoisonedRAG poisoning is the strongest
+inducer (0.74 to 0.85 across models), while the clean condition already
+hallucinates at 0.15 to 0.28. Because the clean base rate is this high, a
+0.10 selective-risk target sits below it for these models, so the
+realistic operating point is $\alpha = 0.20$. At that target the
+dissociation reproduces directionally: marginal CRC violates between 47\%
+and 62\% of resplits, whereas risk-binned Mondrian CRC holds (0\% to 1\%
+violations, realized risk 0.09 to 0.12) at a 21\% to 23\% answer rate. We
+frame this honestly. The controlled world produces the dramatic
+headline that marginal CRC violates in essentially every resplit;
+naturalistic noise is milder and the base rates higher, so marginal CRC
+violates about half the resplits while the binned fix restores validity
+at a usable answer rate. The naturalistic run corroborates the direction
+of the controlled result on real data rather than reproducing its
+magnitude.
+
+\begin{figure}[tbp]
+\centering
+\includegraphics[width=0.8\textwidth]{fig_naturalistic_percond.png}
+\caption{Per-condition hallucination rate under real SQuAD retrieval.
+Closed-book and missing-evidence conditions and PoisonedRAG poisoning
+drive the highest hallucination; the clean condition already sits at
+0.15 to 0.28, which sets the realistic selective-risk target at
+$\alpha = 0.20$.}
+\label{fig:natpercond}
+\end{figure}
+
+\subsection{Why semantic entropy fails: missing-evidence versus
+misinformation}\label{sec:decomp}
+The baseline collapse and the naturalistic milder gap have a single
+explanation, which also reconciles the controlled and natural results.
+Within the injected naturalistic conditions we split failures into two
+mechanisms and measure each signal's AUROC for predicting hallucination
+(Table~\ref{tab:decomp}). \emph{Missing-evidence} failures (closed-book
+and graded irrelevance) leave the model with no usable passage;
+\emph{misinformation} failures (rank-1 contradiction, contradiction-only,
+poisoning, and mixed) place a coherent but false passage in context.
+
+\begin{table}[tbp]
+\centering\small
+\caption{Decomposition of naturalistic injected failures into
+missing-evidence and misinformation, with each signal's AUROC for
+predicting hallucination. Semantic entropy (SE) is informative on
+missing-evidence but near chance on misinformation; retrieval
+descriptors are the mirror image; the combined estimator captures both.}
+\label{tab:decomp}
+\begin{tabular}{lllcccc}
+\toprule
+Generator & Failure mode & $n$ & H-rate & SE & Retrieval & Combined \\
+\midrule
+Qwen2.5-7B & missing-evidence & 51  & 0.69 & 0.668 & 0.513 & 0.420 \\
+Qwen2.5-7B & misinformation   & 961 & 0.39 & 0.521 & 0.800 & 0.859 \\
+Mistral-7B & missing-evidence & 453 & 0.86 & 0.701 & 0.504 & 0.744 \\
+Mistral-7B & misinformation   & 692 & 0.30 & 0.587 & 0.667 & 0.755 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The pattern is clean and complementary. Semantic entropy detects
+missing-evidence uncertainty (AUROC 0.67 to 0.70) but is near chance on
+confident misinformation absorption (0.52 to 0.59): when the model
+absorbs a false but coherent passage, its sampled answers agree on the
+absorbed falsehood, so entropy is low even though the answer is wrong; this
+is precisely the regime in which sampling-based entropy is known to be
+ineffective \citep{ma2025semanticenergy}, and it aligns with the
+epistemic-versus-aleatoric view of language-model uncertainty
+\citep{ahdritz2024knowable}.
+The retrieval descriptors are the mirror image, near chance on
+missing-evidence (0.50 to 0.51, because retrieval scores do not reveal
+the model's internal state) but strong on misinformation (0.67 to 0.80,
+because contradictory and irrelevant passages have observable
+signatures). The combined estimator captures both modes
+(Figure~\ref{fig:decomp}). This reconciles the whole paper. It explains
+why the semantic entropy baseline collapses on injected conflict noise,
+the headline of \S\ref{sec:baselines} and \S\ref{sec:generality}; why
+semantic entropy looked competitive on purely natural noise
+(\S\ref{sec:natnoise}), which is dominated by missing-evidence failures;
+and why the combined estimator is the right design, since its two
+signal families are complementary rather than redundant. The Qwen
+missing-evidence cell has small $n = 51$ because that model abstains
+heavily under irrelevance, so Mistral ($n = 453$) is the reliable
+demonstration; the pattern is consistent across both generators.
+
+\begin{figure}[tbp]
+\centering
+\includegraphics[width=0.8\textwidth]{fig_decomposition.png}
+\caption{The missing-evidence versus misinformation decomposition.
+Semantic entropy is informative only on missing-evidence failures;
+retrieval descriptors only on misinformation; the combined estimator
+covers both regimes.}
+\label{fig:decomp}
+\end{figure}
+
+\subsection{Purely natural retrieval noise}\label{sec:natnoise}
+To rule out the objection that injected noise is synthetic, we ran the
+pipeline with \emph{no} injection at all: the full SQuAD pool of about
+2{,}000 paragraphs, Qwen2.5-7B, BM25 and dense retrieval pooled, 553
+answered queries at a base hallucination rate of 0.212. The retriever's
+own failures suffice to induce hallucination. When the gold paragraph is
+retrieved, hallucination is 0.179 ($n = 507$); when the retriever misses
+the gold paragraph it rises to 0.625 ($n = 16$); and closed-book sits at
+0.533 ($n = 30$). A natural retrieval miss therefore raises hallucination
+about 3.5 times with zero injected noise (Figure~\ref{fig:natnoise}). On
+this subtle natural noise the retrieval descriptors are weak and semantic
+entropy is competitive (combined-minus-semantic-entropy $+0.017$, 95\% CI
+$[-0.024, +0.059]$, not significant), the opposite of the injected
+finding. The decomposition of \S\ref{sec:decomp} explains why: natural
+retrieval noise is dominated by missing-evidence failures, the regime in
+which semantic entropy works and the retrieval descriptors do not.
+
+\begin{figure}[tbp]
+\centering
+\includegraphics[width=0.8\textwidth]{fig_natnoise.png}
+\caption{Purely natural retrieval noise on the full SQuAD pool with no
+injection. Hallucination rises from 0.179 when the gold paragraph is
+retrieved to 0.625 when the retriever misses it, with closed-book at
+0.533.}
+\label{fig:natnoise}
+\end{figure}
+
+\section{Discussion}\label{sec:discussion}
+
+\paragraph{Reconciling with the power of noise.}
+\citet{cuconasu2024power} found that random unrelated documents can
+improve RAG accuracy, whereas high-ranked distractors hurt. Our
+irrelevance fillers are topically plausible hard negatives drawn from
+the same world, and their effect is monotonically harmful (0.00 to
+0.62 hallucination as severity rises). The two findings are
+consistent: harm scales with the plausibility of the noise, not its
+volume. Our distractor and conflict conditions extend the harmful end
+of that spectrum and show that the harm becomes silent exactly when
+plausibility is highest.
+
+\paragraph{Per-decision versus population certificates.}
+C-RAG \citep{kang2024crag} answers whether a RAG system is safe on
+average under bounded drift. Our experiments show that a system can
+satisfy such a bound while per-decision calibration fails on every
+resplit under noise-regime selection. The two guarantees are
+complementary: population certificates for system acceptance,
+per-decision certification for runtime gating.
+
+\paragraph{What the testbed buys and what it costs.}
+The controlled world provides exact labels, causal attribution of
+retrieval-induced error, and full coverage of a typed noise grid, none
+of which naturalistic benchmarks offer. The cost is ecological
+validity: template text, lexically detectable noise, sub-billion
+generators, BM25 retrieval. We regard it as a wind tunnel for RAG. The
+phenomena established here are mechanism-level claims, replicated across
+two architectures and two independent content domains, and the released
+harness makes scaling them to 7B-class models and naturalistic corpora
+(Natural Questions, HotpotQA, RAGTruth) an engineering exercise rather
+than a redesign; a ready-to-run GPU notebook is included.
+
+\paragraph{Limitations.}
+Exact-match labels undercount paraphrase hallucinations, mitigated here
+by the closed answer space; methods validated on synthetic hallucinations
+can overstate performance on real, RLHF-aligned model outputs, which is
+precisely why the
+pre-registered protocol of Appendix~\ref{app:prereg} gates headline
+claims on naturalistic corpora with a human-validated judge.
+Assumption~\ref{ass:shift}(ii) is an idealisation; empirically the
+guarantee held across 200 adversarial resplits and all sensitivity
+sweeps, the within-bin stress test of \S\ref{sec:selfdiag} degraded it
+only to a 4\% violation rate, and the deployment monitor detects the
+residual failure mode, but a shift that splits bins along an unmonitored
+covariate could still degrade validity. The certification answer rate
+(29\% at $\alpha = 0.10$ under severe shift) is a substantial price;
+richer scores, adaptive binning, and partial within-bin ordering are
+natural directions. Our generators are small; the cross-architecture and
+cross-domain agreement and the GPU replication path address, but do not
+close, the scale question.
+
+\section{Conclusion}
+Retrieval noise inverts the reliability story of RAG: it manufactures
+confident errors, defeats context-agnostic uncertainty estimation, and
+silently breaks the exchangeability that per-decision guarantees rest
+on. Conditioning risk estimation on observable evidence structure
+recovers predictive power, beating purpose-built uncertainty baselines,
+and certifying risk-score bins rather than extrapolating thresholds
+restores statistical validity at a quantified answer-rate cost, robustly
+across targets, bin counts, shift severities, model architectures, and
+content domains, with a deployment monitor that makes the governing
+assumption checkable. The full harness, the labelled generations, and
+the analysis code are released to support replication and extension to
+naturalistic and multilingual settings.
+
+\paragraph{Reproducibility statement.}
+All experiments run on commodity CPU hardware; the complete pipeline
+(world construction, noise injection, generation, analysis) is
+deterministic given seeds, checkpointed, and resumable. A Colab
+notebook replicates the protocol with 7B-class GPU models.
+
+\appendix
+
+\section{Reproducibility Checklist}\label{app:repro}
+\begin{itemize}
+\item \textbf{Data.} Two synthetic corpora (scientists, companies) and
+their real-fact complements are generated by released scripts from
+fixed seeds; no external data or licences are required. The full set of
+6{,}230 (main) plus 2{,}970 (second-domain) plus 720 (multi-sample
+baseline) labelled generations is released.
+\item \textbf{Models.} flan-t5-base, flan-t5-small (public,
+Apache-2.0), and Qwen2.5-0.5B-Instruct (public). Greedy decoding for
+labels; five temperature samples per query for semantic entropy.
+\item \textbf{Labels.} Exact normalised match against a closed answer
+space with a pattern-based abstention class; no human or LLM judge is
+in the measurement loop, so labels are deterministic.
+\item \textbf{Risk estimator.} Gradient-boosted trees (150 estimators,
+depth 3), question-grouped five-fold cross-validation; out-of-fold
+scores cached and released. Robust across logistic regression, random
+forest, and a multilayer perceptron.
+\item \textbf{Conformal protocol.} 200 question-level resplits with
+fixed seeds; clean-heavy calibration (30\% noisy retention) and
+noise-heavy deployment (50\% clean retention); $\alpha = 0.10$,
+$B = 10$, $\delta = 0.10$ unless swept.
+\item \textbf{Baselines.} Discrete semantic entropy (five samples,
+exact-equivalence clustering) and P(True) self-evaluation computed on
+the same generator.
+\item \textbf{Statistics.} Paired bootstrap over questions (2{,}000
+resamples) for AUROC differences; violation rates over the 200
+resplits; all figures regenerated by released analysis scripts.
+\item \textbf{Compute.} Entire study reproducible in a few CPU-hours; a
+GPU notebook scales the identical protocol to 7B-class models.
+\end{itemize}
+
+\section{Pre-registered Naturalistic Validation Protocol}
+\label{app:prereg}
+The controlled testbed isolates mechanism; the following protocol,
+registered here in advance, tests external validity on naturalistic
+data and is the planned extension. (i) \emph{Corpora and queries:}
+Natural Questions-open and HotpotQA, with retrieval over a Wikipedia
+index using both BM25 and a dense retriever (e5 or bge), so findings
+are not retriever-specific. (ii) \emph{Noise:} naturally occurring
+retrieval noise plus injected typed noise matched to the controlled
+conditions, including a corpus-poisoning condition following
+\citet{zou2025poisonedrag}. (iii) \emph{Labels:} a hallucination judge
+validated against human double-annotation on a 1{,}500-example subset
+with a pre-registered agreement gate ($\kappa \ge 0.7$) before any
+headline claim, addressing the synthetic-versus-real gap. (iv) \emph{Models:}
+Llama-3.1-8B-Instruct and Qwen2.5-7B-Instruct, with semantic-entropy and
+P(True) baselines carried over from \S\ref{sec:baselines}.
+(v) \emph{Pre-registered predictions:} the three behavioural
+regularities and the marginal-CRC violation persist; risk-binned CRC
+retains validity; the noise-conditional estimator continues to beat
+semantic entropy; and the calibration-transfer dissociation of
+\S\ref{sec:transfer} extends to cross-lingual transfer (English to
+Bengali), where a source-calibrated threshold is expected to
+miscalibrate while discrimination transfers.
+
+\section*{Declarations}
+
+\paragraph{Funding.} The authors received no specific funding for this work.
+
+\paragraph{Competing interests.} The authors declare no competing interests.
+
+\paragraph{Author contributions.} A.D. and S.C. led the
+conceptualisation, methodology, experiments, and writing; S.P. contributed
+to the remaining aspects of the work. All authors read and approved the
+final manuscript.
+
+\paragraph{Use of AI tools.} The authors used AI tools only for code
+debugging and spell checking. All experimental designs, analyses, results,
+and claims are the authors' own and were verified by the authors, who take
+full accountability for the content of this article.
+
+\paragraph{Data availability.} All datasets generated and analysed in this
+study, together with the complete code for corpus construction, noise
+injection, generation, and analysis, are released in the supplementary
+material and will be deposited in a public repository upon acceptance. The
+study uses only publicly available, openly licensed models and synthetically
+generated corpora; no human-subjects or proprietary data are used. The
+naturalistic validation uses the publicly available SQuAD dataset together
+with the openly licensed Qwen2.5-7B-Instruct and Mistral-7B-v0.3 generators.
+
+\bibliography{refs}
+
+\end{document}
